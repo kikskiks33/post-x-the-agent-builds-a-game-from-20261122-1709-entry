@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tangkap Bintang — satu prompt, satu game</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0b1026; height: 100%; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="540"></canvas>
+<script>
+"use strict";
+
+// Tangkap Bintang — catch the falling stars in your basket.
+// I built this from one prompt: "a tiny browser game where you catch
+// falling stars with a basket". One file, no libraries, no network.
+// Arrow keys, mouse or a finger — whatever the player has at hand.
+
+// ---- a tiny seeded RNG, so the demo replay shows the exact same game ----
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const W = 960, H = 540;
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+
+// ---- everything the game needs to remember between frames ----
+let rng = mulberry32((Date.now() % 2147483647) || 1);
+let stars = [];      // what's falling right now: {x, y, vy, r, kind, sway, phase}
+let sparks = [];     // the little burst when a star lands in the basket
+let floaters = [];   // floating "+1" / "Jatuh!" texts that drift up and fade
+let score = 0, lives = 3, level = 1, caught = 0, spawned = 0;
+let elapsed = 0, spawnTimer = 0.5, over = false, started = false;
+let basket = { x: W / 2, w: 116, h: 26, speed: 560 };
+let keys = {};
+let pointerX = null;
+let muted = false;
+
+// the sky never changes mid-game: these background stars are fixed at load
+const bgRng = mulberry32(7);
+const bgStars = [];
+for (let i = 0; i < 90; i++) {
+  bgStars.push({ x: bgRng() * W, y: bgRng() * H * 0.7, r: 0.6 + bgRng() * 1.6, tw: bgRng() * 6.28 });
+}
+
+function reset(seed) {
+  rng = mulberry32(seed);
+  stars = []; sparks = []; floaters = [];
+  score = 0; lives = 3; level = 1; caught = 0; spawned = 0;
+  elapsed = 0; spawnTimer = 0.5; over = false;
+  basket.x = W / 2;
+}
+
+function spawnStar() {
+  spawned++;
+  const roll = rng();
+  // a little rhythm so the player learns to look forward to it: every 8th
+  // thing that falls is golden (3 points), and about one in eight is a rock
+  const kind = spawned % 8 === 0 ? "gold" : (roll < 0.12 ? "rock" : "star");
+  const speed = 130 + level * 28 + rng() * 70;
+  stars.push({
+    x: 30 + rng() * (W - 60),
+    y: -20,
+    vy: speed,
+    r: kind === "rock" ? 15 : 13,
+    kind: kind,
+    sway: 14 + rng() * 22,
+    phase: rng() * 6.28
+  });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rng() * 6.283, sp = 40 + rng() * 140;
+    sparks.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 40, life: 0.55, color: color });
+  }
+}
+
+function beep(freq, dur, type) {
+  // tiny WebAudio blips — wrapped in try/catch because a headless browser
+  // (where I film the footage) has no audio and no user gesture yet
+  if (muted) return;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    beep.ctx = beep.ctx || new AC();
+    const o = beep.ctx.createOscillator(), g = beep.ctx.createGain();
+    o.type = type || "sine"; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.12, beep.ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, beep.ctx.currentTime + dur);
+    o.connect(g); g.connect(beep.ctx.destination);
+    o.start(); o.stop(beep.ctx.currentTime + dur);
+  } catch (e) { /* headless / no audio: stay silent */ }
+}
+
+// ---- the one update step everything shares: live play and the demo replay ----
+// Keeping a single update() for both is what makes the filmed footage honest:
+// the demo is not a staged animation, it is this same game playing itself.
+function update(dt) {
+  if (over) return;
+  elapsed += dt;
+
+  // spawn faster as the level climbs
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnStar();
+    const interval = Math.max(0.34, 0.92 - level * 0.07);
+    spawnTimer = interval * (0.75 + rng() * 0.5);
+  }
+
+  // basket: keyboard first, then the pointer, then the autopilot.
+  // The autopilot is what plays the demo — same speed limit as a human,
+  // chasing the lowest star that is not a rock.
+  if (keys["ArrowLeft"] || keys["a"]) basket.x -= basket.speed * dt;
+  if (keys["ArrowRight"] || keys["d"]) basket.x += basket.speed * dt;
+  if (pointerX !== null) basket.x += (pointerX - basket.x) * Math.min(1, dt * 14);
+  if (autopilot) {
+    // chase the lowest falling star — the same movement, just no human hand
+    let target = null, lowest = -1;
+    for (const s of stars) {
+      if (s.kind !== "rock" && s.y > lowest) { lowest = s.y; target = s.x; }
+    }
+    if (target !== null) {
+      const dx = target - basket.x;
+      const step = basket.speed * dt;
+      basket.x += Math.max(-step, Math.min(step, dx));
+    }
+  }
+  basket.x = Math.max(basket.w / 2, Math.min(W - basket.w / 2, basket.x));
+
+  const basketTop = H - 64;
+  for (let i = stars.length - 1; i >= 0; i--) {
+    const s = stars[i];
+    s.y += s.vy * dt;
+    s.x += Math.sin(elapsed * 1.6 + s.phase) * s.sway * dt;
+    // caught?
+    if (s.y + s.r >= basketTop && s.y <= basketTop + basket.h + 6 &&
+        Math.abs(s.x - basket.x) < basket.w / 2 + 6) {
+      if (s.kind === "rock") {
+        lives--;
+        floaters.push({ x: s.x, y: basketTop - 10, text: "ADUH! -1 nyawa", color: "#ff5d5d", life: 1 });
+        burst(s.x, basketTop, "#ff5d5d", 14);
+        beep(140, 0.25, "sawtooth");
+      } else {
+        const pts = s.kind === "gold" ? 3 : 1;
+        score += pts; caught++;
+        floaters.push({ x: s.x, y: basketTop - 10, text: "+" + pts, color: s.kind === "gold" ? "#ffd94d" : "#ffffff", life: 0.8 });
+        burst(s.x, basketTop, s.kind === "gold" ? "#ffd94d" : "#8fd3ff", s.kind === "gold" ? 18 : 10);
+        beep(s.kind === "gold" ? 880 : 620, 0.12, "sine");
+        level = Math.floor(caught / 10) + 1;
+      }
+      stars.splice(i, 1);
+      continue;
+    }
+    // fell past the basket
+    if (s.y - s.r > H) {
+      if (s.kind !== "rock") {
+        lives--;
+        floaters.push({ x: s.x, y: H - 30, text: "Jatuh!", color: "#ff9d5d", life: 0.8 });
+        beep(220, 0.2, "triangle");
+      }
+      stars.splice(i, 1);
+    }
+  }
+
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const p = sparks[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 260 * dt; p.life -= dt;
+    if (p.life <= 0) sparks.splice(i, 1);
+  }
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const p = floaters[i];
+    p.y -= 34 * dt; p.life -= dt;
+    if (p.life <= 0) floaters.splice(i, 1);
+  }
+
+  if (lives <= 0) { lives = 0; over = true; }
+}
+
+// ---- drawing ----
+function drawStar(x, y, r, color) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const ang = -Math.PI / 2 + i * Math.PI / 5;
+    const rad = i % 2 === 0 ? r : r * 0.45;
+    const px = x + Math.cos(ang) * rad, py = y + Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function render() {
+  // night sky
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, "#0b1026"); sky.addColorStop(0.6, "#1b2a52"); sky.addColorStop(1, "#2c3f6e");
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+  // the moon is just two circles — a pale one with a dark one sliding
+  // over it, so it reads as a crescent instead of a flat disc
+  ctx.beginPath(); ctx.arc(W - 110, 84, 34, 0, 6.283); ctx.fillStyle = "#f4ead2"; ctx.fill();
+  ctx.beginPath(); ctx.arc(W - 122, 76, 28, 0, 6.283); ctx.fillStyle = "#0b1026"; ctx.fill();
+
+  // twinkling background stars
+  for (const b of bgStars) {
+    const a = 0.35 + 0.65 * Math.abs(Math.sin(elapsed * 1.2 + b.tw));
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "#cfe4ff";
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.283); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // ground
+  ctx.fillStyle = "#101a33"; ctx.fillRect(0, H - 26, W, 26);
+  ctx.fillStyle = "#24365e"; ctx.fillRect(0, H - 28, W, 3);
+
+  // falling things
+  for (const s of stars) {
+    if (s.kind === "rock") {
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.283);
+      ctx.fillStyle = "#5a5f6e"; ctx.fill();
+      ctx.fillStyle = "#3a3f4d";
+      ctx.beginPath(); ctx.arc(s.x - 5, s.y - 4, 4, 0, 6.283); ctx.fill();
+      ctx.beginPath(); ctx.arc(s.x + 6, s.y + 5, 3, 0, 6.283); ctx.fill();
+    } else {
+      ctx.save();
+      ctx.shadowColor = s.kind === "gold" ? "#ffd94d" : "#8fd3ff";
+      ctx.shadowBlur = 16;
+      drawStar(s.x, s.y, s.r, s.kind === "gold" ? "#ffd94d" : "#ffe9a8");
+      ctx.restore();
+    }
+  }
+
+  // sparks
+  for (const p of sparks) {
+    ctx.globalAlpha = Math.max(0, p.life / 0.55);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  // the basket
+  const bx = basket.x - basket.w / 2, by = H - 64;
+  ctx.fillStyle = "#8a5a2b";
+  ctx.beginPath();
+  ctx.moveTo(bx, by); ctx.lineTo(bx + basket.w, by);
+  ctx.lineTo(bx + basket.w - 12, by + basket.h); ctx.lineTo(bx + 12, by + basket.h);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#a9743c";
+  ctx.fillRect(bx + 6, by + 7, basket.w - 12, 4);
+  ctx.fillRect(bx + 9, by + 15, basket.w - 18, 4);
+  ctx.fillStyle = "#c98f4e";
+  ctx.fillRect(bx - 4, by - 4, basket.w + 8, 7);
+
+  // floaters
+  ctx.textAlign = "center";
+  ctx.font = "bold 20px sans-serif";
+  for (const p of floaters) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  ctx.textAlign = "left";
+  ctx.font = "bold 26px sans-serif";
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText("Skor " + score, 18, 38);
+  ctx.font = "bold 20px sans-serif";
+  ctx.fillStyle = "#ffd94d";
+  ctx.fillText("Level " + level, 18, 68);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#ff8fa3";
+  let hearts = "";
+  for (let i = 0; i < 3; i++) hearts += i < lives ? "♥ " : "♡ ";
+  ctx.font = "28px sans-serif";
+  ctx.fillText(hearts, W - 18, 40);
+
+  if (!started) {
+    ctx.fillStyle = "rgba(6, 10, 30, 0.72)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffd94d";
+    ctx.font = "bold 64px sans-serif";
+    ctx.fillText("TANGKAP BINTANG", W / 2, H / 2 - 30);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "26px sans-serif";
+    ctx.fillText("Tangkap bintangnya, hindari batunya.", W / 2, H / 2 + 18);
+    ctx.fillText("← → / mouse / sentuh untuk gerakkan keranjang", W / 2, H / 2 + 56);
+    ctx.fillStyle = "#8fd3ff";
+    ctx.font = "bold 24px sans-serif";
+    ctx.fillText("Klik atau tekan tombol apa saja untuk mulai", W / 2, H / 2 + 108);
+  } else if (over) {
+    ctx.fillStyle = "rgba(6, 10, 30, 0.78)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff8fa3";
+    ctx.font = "bold 56px sans-serif";
+    ctx.fillText("GAME OVER", W / 2, H / 2 - 20);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "30px sans-serif";
+    ctx.fillText("Skor akhir: " + score + "  ·  Bintang ditangkap: " + caught, W / 2, H / 2 + 30);
+    ctx.fillStyle = "#8fd3ff";
+    ctx.font = "bold 24px sans-serif";
+    ctx.fillText("Tekan R untuk main lagi", W / 2, H / 2 + 80);
+  }
+}
+
+// ---- input ----
+window.addEventListener("keydown", function (e) {
+  keys[e.key] = true;
+  if (!started) { started = true; }
+  if (over && (e.key === "r" || e.key === "R")) { reset((Date.now() % 2147483647) || 1); started = true; }
+  if (e.key === "m" || e.key === "M") muted = !muted;
+  if (["ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+});
+window.addEventListener("keyup", function (e) { keys[e.key] = false; });
+function pointerToX(clientX) {
+  const r = cv.getBoundingClientRect();
+  return (clientX - r.left) / r.width * W;
+}
+cv.addEventListener("pointermove", function (e) { pointerX = pointerToX(e.clientX); if (!started) started = true; });
+cv.addEventListener("pointerdown", function (e) {
+  pointerX = pointerToX(e.clientX);
+  if (!started) { started = true; return; }
+  if (over) { reset((Date.now() % 2147483647) || 1); started = true; }
+});
+
+// ---- two ways to run it: a human plays, or the game plays itself ----
+// ?demo=1&t=12 freezes one frame of the real game 12 seconds in — that is
+// how the video's gameplay footage was filmed, in a real headless browser.
+// ?demo=1 on its own runs the live game with the autopilot driving, so the
+// page demos itself to anyone who opens it.
+const params = new URLSearchParams(location.search);
+const demoT = params.get("t");
+let autopilot = params.has("demo");
+
+if (demoT !== null) {
+  // one frozen frame of the real game at time t — used to film the footage
+  reset(20261123);
+  started = true;
+  const steps = Math.max(0, Math.round(parseFloat(demoT) * 60));
+  for (let i = 0; i < steps; i++) update(1 / 60);
+  render();
+} else {
+  reset((Date.now() % 2147483647) || 1);
+  if (autopilot) started = true; // demo mode skips the title screen
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (started) update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>

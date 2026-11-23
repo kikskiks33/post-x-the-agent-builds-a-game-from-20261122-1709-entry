@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tangkap Bintang — satu prompt, satu game</title>
+<title>Catch the Stars — one prompt, one game</title>
 <style>
   html, body { margin: 0; padding: 0; background: #0b1026; height: 100%; overflow: hidden; }
   canvas { display: block; width: 100vw; height: 100vh; }
@@ -14,7 +14,7 @@
 <script>
 "use strict";
 
-// Tangkap Bintang — catch the falling stars in your basket.
+// Catch the Stars — catch the falling stars in your basket.
 // I built this from one prompt: "a tiny browser game where you catch
 // falling stars with a basket". One file, no libraries, no network.
 // Arrow keys, mouse or a finger — whatever the player has at hand.
@@ -37,7 +37,7 @@ const ctx = cv.getContext("2d");
 let rng = mulberry32((Date.now() % 2147483647) || 1);
 let stars = [];      // what's falling right now: {x, y, vy, r, kind, sway, phase}
 let sparks = [];     // the little burst when a star lands in the basket
-let floaters = [];   // floating "+1" / "Jatuh!" texts that drift up and fade
+let floaters = [];   // floating "+1" / "Missed!" texts that drift up and fade
 let score = 0, lives = 3, level = 1, caught = 0, spawned = 0;
 let elapsed = 0, spawnTimer = 0.5, over = false, started = false;
 let basket = { x: W / 2, w: 116, h: 26, speed: 560 };
@@ -147,7 +147,7 @@ function update(dt) {
         Math.abs(s.x - basket.x) < basket.w / 2 + 6) {
       if (s.kind === "rock") {
         lives--;
-        floaters.push({ x: s.x, y: basketTop - 10, text: "ADUH! -1 nyawa", color: "#ff5d5d", life: 1 });
+        floaters.push({ x: s.x, y: basketTop - 10, text: "OUCH! -1 life", color: "#ff5d5d", life: 1 });
         burst(s.x, basketTop, "#ff5d5d", 14);
         beep(140, 0.25, "sawtooth");
       } else {
@@ -165,7 +165,7 @@ function update(dt) {
     if (s.y - s.r > H) {
       if (s.kind !== "rock") {
         lives--;
-        floaters.push({ x: s.x, y: H - 30, text: "Jatuh!", color: "#ff9d5d", life: 0.8 });
+        floaters.push({ x: s.x, y: H - 30, text: "Missed!", color: "#ff9d5d", life: 0.8 });
         beep(220, 0.2, "triangle");
       }
       stars.splice(i, 1);
@@ -276,7 +276,7 @@ function render() {
   ctx.textAlign = "left";
   ctx.font = "bold 26px sans-serif";
   ctx.fillStyle = "#ffffff";
-  ctx.fillText("Skor " + score, 18, 38);
+  ctx.fillText("Score " + score, 18, 38);
   ctx.font = "bold 20px sans-serif";
   ctx.fillStyle = "#ffd94d";
   ctx.fillText("Level " + level, 18, 68);
@@ -293,14 +293,14 @@ function render() {
     ctx.textAlign = "center";
     ctx.fillStyle = "#ffd94d";
     ctx.font = "bold 64px sans-serif";
-    ctx.fillText("TANGKAP BINTANG", W / 2, H / 2 - 30);
+    ctx.fillText("CATCH THE STARS", W / 2, H / 2 - 30);
     ctx.fillStyle = "#ffffff";
     ctx.font = "26px sans-serif";
-    ctx.fillText("Tangkap bintangnya, hindari batunya.", W / 2, H / 2 + 18);
-    ctx.fillText("← → / mouse / sentuh untuk gerakkan keranjang", W / 2, H / 2 + 56);
+    ctx.fillText("Catch the stars, dodge the rocks.", W / 2, H / 2 + 18);
+    ctx.fillText("← → / mouse / touch to move the basket", W / 2, H / 2 + 56);
     ctx.fillStyle = "#8fd3ff";
     ctx.font = "bold 24px sans-serif";
-    ctx.fillText("Klik atau tekan tombol apa saja untuk mulai", W / 2, H / 2 + 108);
+    ctx.fillText("Click or press any key to start", W / 2, H / 2 + 108);
   } else if (over) {
     ctx.fillStyle = "rgba(6, 10, 30, 0.78)";
     ctx.fillRect(0, 0, W, H);
@@ -310,10 +310,10 @@ function render() {
     ctx.fillText("GAME OVER", W / 2, H / 2 - 20);
     ctx.fillStyle = "#ffffff";
     ctx.font = "30px sans-serif";
-    ctx.fillText("Skor akhir: " + score + "  ·  Bintang ditangkap: " + caught, W / 2, H / 2 + 30);
+    ctx.fillText("Final score: " + score + "  ·  Stars caught: " + caught, W / 2, H / 2 + 30);
     ctx.fillStyle = "#8fd3ff";
     ctx.font = "bold 24px sans-serif";
-    ctx.fillText("Tekan R untuk main lagi", W / 2, H / 2 + 80);
+    ctx.fillText("Press R to play again", W / 2, H / 2 + 80);
   }
 }
 
